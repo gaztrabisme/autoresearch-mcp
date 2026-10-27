@@ -1,1 +1,1 @@
-"""Sequential experiment-loop core; MCP and proposer integration belong to B3."""
+"""Sequential experiments with guarded proposals and evaluator-only scoring."""

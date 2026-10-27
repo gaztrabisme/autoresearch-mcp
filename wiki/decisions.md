@@ -1,4 +1,4 @@
-# B2 decisions
+# Implementation decisions
 
 Owner: autoresearch-mcp maintainers. Reviewed: 2026-10-27.
 
@@ -40,3 +40,63 @@ falling back when the macOS sandbox cannot start.
 Limits: in-process serialization is the v1 contract; multi-server coordination
 and automatic recovery across an interrupted Git-ref/best.json update are not
 claimed. A branch/best mismatch fails visibly on the next operation.
+
+## B3
+
+- Context: B2 JSONL is append-only, with one row per measurement. Decision: a
+  transient Session.log_context adds proposer state/denials/call identity to
+  those rows. Reports group iterations for keep/gain/noise decisions and dedupe
+  proposer_call_id for calls/denials. Tests:
+  test_run_keeps_and_discards_with_fake_proposer,
+  test_no_duplicate_denials_across_remeasurements.
+- Context: the child needs its runtime bootstrap files but must not read the
+  evaluator session. Decision: fresh runtime roots under subagent's configured
+  session_root, with optional AUTORESEARCH_SUBAGENT_ROOT or constructor override;
+  reject runtime roots inside the denied session. Tests:
+  test_proposer_runtime_is_outside_denied_session,
+  test_proposer_refuses_runtime_inside_private_session,
+  test_subagent_api_and_server_lifecycle.
+- Context: await_ready wakes at human gates as well as terminal completion.
+  Decision: close every returned agent in a finally, and score only completed
+  proposals. Failed, unverified, cancelled or working proposals get an
+  inconclusive proposer_error row. Tests:
+  test_noncompleted_proposals_are_never_scored,
+  test_agent_closed_even_when_wait_fails.
+- Context: a loop needs one reusable runtime and reliable cleanup. Decision:
+  run owns one context-managed runtime; standalone iterate owns one; explicitly
+  injected proposer instances are caller-owned. Tests:
+  test_run_starts_and_stops_one_proposer_runtime,
+  test_server_is_stopped_after_start_failure.
+- Context: MCP run must return promptly while status/stop remain usable.
+  Decision: a lock protects background-run admission and other mutations;
+  progress reads use atomic state.md and only complete JSONL lines. Failure is
+  visible in status. Tests: test_run_refuses_a_second_concurrent_run,
+  test_mcp_run_returns_immediately_and_status_stop_remain_available,
+  test_status_ignores_only_an_unfinished_final_log_row.
+- Context: cancellation inside a keep/re-measure transaction risks partial
+  bookkeeping. Decision: stop/time caps are cooperative between iterations;
+  the pre-proposal memory gate is interruptible. Plateau history counts prior
+  candidates and resets on keep; default ten is configurable. Tests:
+  test_default_plateau_stops_after_ten_non_keeps,
+  test_keep_resets_plateau_streak,
+  test_memory_wait_can_stop_without_creating_worktree.
+- Context: stdout carries MCP protocol frames. Decision: library/CLI finalize
+  prints its report path; MCP passes print_path=False and returns structured
+  content. Reuse MCP 2's MCPServer from the existing SDK dependency.
+  Tests: test_mcp_finalize_does_not_print_on_stdio,
+  test_mcp_stdio_handshake_lists_tools_and_reads_status.
+
+Independent agent review is deferred: automatic approval review rejected that
+tool in B2. B3 used source inspection and executable checks, without claiming
+those are independent review. Codex registration syntax was checked against
+subagent/install.py after the official documentation lookup was denied.
+
+## B3 MCP 2 correction
+
+Context: the original server and tests were verified under system Python with
+MCP 1.22.0; project MCP 2.3.0 removes that FastMCP import and uses snake_case
+models/CallToolResult. Decision: follow subagent/mcp_server.py's MCPServer,
+app.tool, app.run and ToolError pattern. Port the existing schema, result and
+stdio assertions to MCP 2 and run the entire suite with .venv/bin/python plus
+.venv/bin/ruff. The original system-interpreter pass is superseded as acceptance
+evidence. No dependency was added or pinned back to MCP 1.

@@ -129,12 +129,12 @@ def test_training_cannot_change_the_candidate_being_committed(session_factory, o
     assert log_rows(session)[-1]["status"] == "crash"
 
 
-def test_noop_is_recorded_without_training(session_factory, offline_sandbox):
+def test_no_change_is_recorded_without_training(session_factory, offline_sandbox):
     session = session_factory()
     baseline(session)
     worktree = create(session, 1)
     result = score_candidate(session, worktree, "no edit")
-    assert result["status"] == "noop"
+    assert result["status"] == "no_change"
     assert result["seed"] is None
     assert len(log_rows(session)) == 4
 

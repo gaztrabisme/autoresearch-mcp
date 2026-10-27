@@ -5,6 +5,10 @@ description = "Core of a sequential, evaluator-scored autonomous experiment loop
 requires-python = ">=3.11"
 dependencies = ["subagent"]
 
+[project.scripts]
+autoresearch = "autoresearch_mcp.cli:main"
+autoresearch-mcp = "autoresearch_mcp.server:main"
+
 [tool.uv.sources]
 subagent = { path = "../subagent-mcp-wt/autoresearch-aware", editable = true }
 

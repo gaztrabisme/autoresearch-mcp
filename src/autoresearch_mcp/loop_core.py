@@ -29,6 +29,9 @@ def _record(session, iteration, idea, phase, result, before, diff=None, flags=()
         "changed_files": diff.changed_files if diff else [],
         "hunks": diff.hunks if diff else 0,
         "flags": list(flags),
+        "proposer_state": None,
+        "denials": 0,
+        **session.log_context,
         **result,
     }
     session.append(row)
@@ -148,7 +151,14 @@ def score_candidate(session: Session, worktree, idea: str) -> dict:
                 return row
             if not diff.changed_files:
                 row = _record(
-                    session, iteration, idea, "candidate", {"status": "noop"}, before, diff, flags
+                    session,
+                    iteration,
+                    idea,
+                    "candidate",
+                    {"status": "no_change"},
+                    before,
+                    diff,
+                    flags,
                 )
                 _tried(session, iteration, idea, row["status"])
                 return row

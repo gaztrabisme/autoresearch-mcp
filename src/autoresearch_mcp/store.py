@@ -37,6 +37,7 @@ class Config:
     provider: str = ""
     holdout_cmd: list[str] | str = field(default_factory=list)
     goal: str = ""
+    plateau_limit: int = 10
 
     def __post_init__(self):
         object.__setattr__(self, "target_repo", Path(self.target_repo).expanduser().resolve())
@@ -44,7 +45,7 @@ class Config:
             raise ValueError("direction must be min or max")
         if not re.fullmatch(r"[A-Za-z_][\w./-]*", self.metric):
             raise ValueError("invalid metric name")
-        for name in ("steps", "baseline_runs", "remeasure_runs", "max_iter"):
+        for name in ("steps", "baseline_runs", "remeasure_runs", "max_iter", "plateau_limit"):
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
@@ -99,6 +100,7 @@ class Session:
     session_dir: Path
     workspace_dir: Path
     queue: RunQueue = field(default_factory=RunQueue, repr=False)
+    log_context: dict = field(default_factory=dict, repr=False)
 
     @classmethod
     def create(
@@ -162,7 +164,11 @@ class Session:
         return self.config.timeout_factor * median(best["wall_times"])
 
     def rows(self) -> list[dict]:
-        lines = (self.session_dir / "log.jsonl").read_text().splitlines()
+        content = (self.session_dir / "log.jsonl").read_text()
+        lines = content.splitlines()
+        # Status can read concurrently with an append; only newline-terminated rows are complete.
+        if content and not content.endswith("\n"):
+            lines = lines[:-1]
         return [json.loads(line) for line in lines]
 
     def next_seed(self) -> int:

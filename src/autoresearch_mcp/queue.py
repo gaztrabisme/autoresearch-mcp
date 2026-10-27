@@ -38,15 +38,22 @@ class RunQueue:
         self.lock = _RUN_LOCK
 
     def run(self, operation: Callable[[], dict], memory_free_min_pct: float) -> dict:
+        with self.lock:
+            free = self.wait_for_memory(memory_free_min_pct)
+            result = operation()
+            return {**result, "memory_free_pct": free}
+
+    def wait_for_memory(self, memory_free_min_pct: float, *, cancelled=None) -> float:
+        """Wait before creating a proposer workspace; cancellation is cooperative."""
         if not 0 <= memory_free_min_pct <= 100:
             raise ValueError("memory_free_min_pct must be in [0, 100]")
         with self.lock:
             while True:
+                if cancelled is not None and cancelled():
+                    raise InterruptedError("experiment loop stopped while waiting for memory")
                 free = self.memory_reader()
                 if not math.isfinite(free) or not 0 <= free <= 100:
                     raise ValueError("invalid memory free percentage")
                 if free >= memory_free_min_pct:
-                    break
+                    return free
                 self.clock.sleep(self.poll_interval_s)
-            result = operation()
-            return {**result, "memory_free_pct": free}

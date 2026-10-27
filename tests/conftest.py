@@ -1,4 +1,5 @@
 import json
+import os
 import subprocess
 import sys
 
@@ -11,7 +12,15 @@ from autoresearch_mcp.worktree import git
 sys.dont_write_bytecode = True
 
 
+@pytest.hookimpl(trylast=True)
 def pytest_collection_modifyitems(items):
+    if not any("macos_sandbox" in item.keywords for item in items):
+        return
+    if os.environ.get("AUTORESEARCH_SKIP_NATIVE") == "1":
+        for item in items:
+            if "macos_sandbox" in item.keywords:
+                item.add_marker(pytest.mark.skip(reason="native execution disabled by caller"))
+        return
     try:
         probe = subprocess.run(
             ["sandbox-exec", "-p", "(version 1)(allow default)", "/usr/bin/true"],
@@ -36,6 +45,7 @@ def pytest_collection_modifyitems(items):
 def session_factory(tmp_path, monkeypatch):
     monkeypatch.setenv("AUTORESEARCH_HOME", str(tmp_path / "private"))
     monkeypatch.setenv("AUTORESEARCH_WT_ROOT", str(tmp_path / "public"))
+    monkeypatch.setenv("AUTORESEARCH_SNAP_ROOT", str(tmp_path / "snapshots"))
     repo = tmp_path / "target"
     repo.mkdir()
     git(repo, "init", "-q")
@@ -92,7 +102,7 @@ def session_factory(tmp_path, monkeypatch):
 @pytest.fixture
 def offline_sandbox(monkeypatch):
     # Only the OS boundary is substituted. Marked tests exercise the real wrapper.
-    monkeypatch.setattr("subagent.sandbox.wrap_argv", lambda argv, deny_paths: argv)
+    monkeypatch.setattr("subagent.sandbox.wrap_argv", lambda argv, deny_paths, **kwargs: argv)
 
 
 def log_rows(session):

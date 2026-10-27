@@ -1,4 +1,5 @@
 import json
+import signal
 import subprocess
 from unittest.mock import Mock
 
@@ -17,13 +18,16 @@ def cli_process_setup(monkeypatch):
     monkeypatch.delenv("AUTORESEARCH_CLAUDE_BIN", raising=False)
     monkeypatch.setattr("shutil.which", lambda name: "/local/bin/claude")
     wrapper = Mock(side_effect=lambda argv, paths: ["sandbox-wrapper", *argv])
-    process = Mock(
-        return_value=subprocess.CompletedProcess(
-            [], 0, json.dumps({"result": "Changed it.\nIDEA: improve value", "is_error": False}), ""
-        )
+    child = Mock(
+        pid=12345, returncode=0,
+        communicate=Mock(return_value=(
+            json.dumps({"result": "Changed it.\nIDEA: improve value", "is_error": False}), ""
+        )),
     )
+    process = Mock(return_value=child)
     monkeypatch.setattr("subagent.sandbox.wrap_argv", wrapper)
-    monkeypatch.setattr("autoresearch_mcp.proposer.subprocess.run", process)
+    monkeypatch.setattr("autoresearch_mcp.proposer.subprocess.Popen", process)
+    monkeypatch.setattr("autoresearch_mcp.proposer.os.killpg", Mock())
     return wrapper, process
 
 
@@ -33,7 +37,7 @@ def test_claude_cli_argv_is_wrapped_and_uses_worktree(session_factory, tmp_path,
     wrapper, process = cli_process_setup(monkeypatch)
     result = proposers.ClaudeCliProposer().propose(session, tmp_path, "brief with 'quotes'\nline")
     argv, paths = wrapper.call_args.args
-    assert paths == [str(session.session_dir)]
+    assert paths == [str(session.session_dir), str(session.snapshot_dir.parent)]
     assert argv[:7] == [
         "/local/bin/claude",
         "-p",
@@ -55,10 +59,14 @@ def test_claude_cli_argv_is_wrapped_and_uses_worktree(session_factory, tmp_path,
     assert process.call_args.args == (["sandbox-wrapper", *argv],)
     assert process.call_args.kwargs == {
         "cwd": str(tmp_path),
-        "capture_output": True,
+        "stdout": subprocess.PIPE,
+        "stderr": subprocess.PIPE,
+        "stdin": subprocess.DEVNULL,
         "text": True,
-        "timeout": 600,
+        "start_new_session": True,
     }
+    process.return_value.communicate.assert_called_once_with(timeout=600)
+    proposers.os.killpg.assert_called_once_with(12345, signal.SIGKILL)
     assert result == ProposalResult(
         "improve value", "completed", raw="Changed it.\nIDEA: improve value"
     )
@@ -72,7 +80,7 @@ def test_claude_cli_bin_override_model_and_timeout(session_factory, tmp_path, mo
     argv = wrapper.call_args.args[0]
     assert argv[0] == "/custom/claude"
     assert argv[argv.index("--model") + 1] == "sonnet"
-    assert process.call_args.kwargs["timeout"] == 17
+    process.return_value.communicate.assert_called_once_with(timeout=17)
 
 
 @pytest.mark.parametrize(
@@ -88,7 +96,8 @@ def test_claude_cli_bin_override_model_and_timeout(session_factory, tmp_path, mo
 def test_claude_cli_failures(session_factory, tmp_path, monkeypatch, returncode, stdout, expected):
     session = session_factory()
     _, process = cli_process_setup(monkeypatch)
-    process.return_value = subprocess.CompletedProcess([], returncode, stdout, "")
+    process.return_value.returncode = returncode
+    process.return_value.communicate.return_value = (stdout, "")
     result = proposers.ClaudeCliProposer().propose(session, tmp_path, "brief")
     assert result.run_state == "failed"
     assert result.denials == 0
@@ -98,19 +107,21 @@ def test_claude_cli_failures(session_factory, tmp_path, monkeypatch, returncode,
 def test_claude_cli_timeout(session_factory, tmp_path, monkeypatch):
     session = session_factory()
     _, process = cli_process_setup(monkeypatch)
-    process.side_effect = subprocess.TimeoutExpired("claude", 12)
+    process.return_value.communicate.side_effect = subprocess.TimeoutExpired("claude", 12)
     result = proposers.ClaudeCliProposer(timeout_s=12).propose(session, tmp_path, "brief")
     assert result.run_state == "timeout"
     assert result.denials == 0
     assert "12" in result.raw
+    proposers.os.killpg.assert_called_once_with(12345, signal.SIGKILL)
+    process.return_value.wait.assert_called_once()
 
 
 def test_claude_cli_idea_can_precede_trailing_text(session_factory, tmp_path, monkeypatch):
     session = session_factory()
     _, process = cli_process_setup(monkeypatch)
-    process.return_value.stdout = json.dumps(
+    process.return_value.communicate.return_value = (json.dumps(
         {"result": "IDEA: first\nIDEA: final idea\nExtra explanation."}
-    )
+    ), "")
     result = proposers.ClaudeCliProposer().propose(session, tmp_path, "brief")
     assert result.idea == "final idea"
 

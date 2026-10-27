@@ -1,5 +1,6 @@
 """Admission and observable state for one background loop in an MCP process."""
 
+import asyncio
 import threading
 from contextlib import contextmanager
 
@@ -36,6 +37,30 @@ class RunManager:
         finally:
             with self._lock:
                 self._busy = False
+
+    async def foreground(self, function, *args, **kwargs):
+        # Transfer admission to the worker before awaiting; caller cancellation
+        # must neither release it nor cancel a queued executor job.
+        with self._lock:
+            self._check_idle()
+            self._busy = True
+
+        def worker():
+            try:
+                return function(*args, **kwargs)
+            finally:
+                with self._lock:
+                    self._busy = False
+
+        try:
+            future = asyncio.get_running_loop().run_in_executor(None, worker)
+        except BaseException:
+            with self._lock:
+                self._busy = False
+            raise
+        # Retrieve failures even if the caller stops waiting.
+        future.add_done_callback(lambda done: done.exception())
+        return await asyncio.shield(future)
 
     def start(self, session, *, max_iter=None, time_cap_s=None, plateau_limit=None):
         with self._lock:

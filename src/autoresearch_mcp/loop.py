@@ -43,6 +43,15 @@ def _iterate(session, proposer, cancelled, stack, cache):
         if not session.best:
             raise ValueError("run baseline before iterating")
         iteration = session.next_iteration()
+        while (session.workspace_dir / f"it-{iteration}").exists():
+            path = session.workspace_dir / f"it-{iteration}"
+            loop_core._record(
+                session, iteration, "interrupted iteration", "candidate",
+                {"status": "abandoned"}, session.best,
+            )
+            session.tried(iteration, "interrupted iteration", "abandoned")
+            worktree.remove(session, path)
+            iteration = session.next_iteration()
         if iteration > session.config.max_iter:
             raise ValueError("max_iter reached")
         free = session.queue.wait_for_memory(

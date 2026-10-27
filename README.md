@@ -47,6 +47,7 @@ tool_timeout_sec = 3600
 [mcp_servers.autoresearch.env]
 AUTORESEARCH_HOME = "/absolute/path/to/private-sessions"
 AUTORESEARCH_WT_ROOT = "/absolute/path/to/public-workspaces"
+AUTORESEARCH_SNAP_ROOT = "/absolute/path/to/private-snapshots"
 ```
 
 The seven tools are `init`, `baseline`, `iterate`, `run`, `status`, `stop` and
@@ -80,7 +81,7 @@ plateau_limit = 10
 memory_free_min_pct = 20.0
 provider = "codex"
 fallback_provider = "claude-cli:haiku" # Optional; empty or omitted disables fallback.
-proposer_timeout_s = 600.0           # Claude CLI timeout, independent of train/eval.
+proposer_timeout_s = 600.0           # Proposer timeout, independent of train/eval.
 train_cmd = ["python3", "train.py"]
 eval_cmd = ["python3", "eval.py"]
 holdout_cmd = ["python3", "holdout.py"]
@@ -118,17 +119,22 @@ totals. Held-out scores never enter keep decisions.
 For subagent providers, each full `run` reuses one `InProcessServer` per selected
 provider role (primary or fallback); each proposal gets one agent, which is
 closed after its run. Standalone `iterate` owns its selected runtimes.
+Subagent readiness waits at most `proposer_timeout_s`; expiry closes the agent
+and records a timeout.
 Library callers can share an explicit `with SubagentProposer(session)` across
 several iterations; injected proposer instances remain caller-owned. Runtime
 files live under subagent's configured `session_root/autoresearch/<name>/<id>`,
-outside the denied private session so provider bootstrap files remain readable.
+outside both the denied private session and snapshot root so provider bootstrap
+files remain readable.
 Set `AUTORESEARCH_SUBAGENT_ROOT` or pass `session_root=` to SubagentProposer to
 change the base. Its `trace_path` identifies trace.jsonl; rows with kind=verdict,
 matching agent_id and action=deny supply the denial count. Trace writing is
 enabled for these runtimes even when the general subagent config disables it.
 
 The Claude CLI proposer runs in the iteration worktree, wrapped by
-`subagent.sandbox.wrap_argv(argv, [session_dir])` to deny private-session access.
+`subagent.sandbox.wrap_argv(argv, [session_dir, snapshot_root])` to deny reads and
+writes of both private session material and all snapshots under the snapshot root.
+Subagent proposers receive the same two paths in `deny_read`.
 It uses the spike's working flags: `-p <brief> --model <model> --tools Read,Edit
 --setting-sources project --strict-mcp-config --permission-mode acceptEdits
 --no-session-persistence --append-system-prompt <focused instructions>
@@ -221,16 +227,37 @@ Proposers edit files; precommitted candidates are rejected as invalid.
 Session records default to `~/.autoresearch/<name>/`; set `AUTORESEARCH_HOME` or
 pass `home=` to `Session.create/load`. Public data, artifacts and worktrees
 default to `~/.cache/autoresearch-wt/<name>/`; set `AUTORESEARCH_WT_ROOT` or pass
-`wt_root=`. These roots must be separate. Workspaces under `~/.autoresearch`
+`wt_root=`. Private evaluation snapshots default to
+`~/.cache/autoresearch-snap/<name>/<run-id>/`; set `AUTORESEARCH_SNAP_ROOT` or pass
+`snap_root=` to `Session.create/load`. The snapshot root must be separate from
+both the session root and workspace root: equal or nested roots in either
+direction are rejected, including through symlinks. Workspaces under `~/.autoresearch`
 are refused even with a custom private root. Use the same roots when reloading.
 `Config` is persisted in `config.toml` before measurement. `goal` is an additional
 optional field for the regenerated state summary. `provider` selects proposal dispatch.
 
 The trainer runs in its iteration worktree with `AUTORESEARCH_STEPS`,
 `AUTORESEARCH_SEED`, `AUTORESEARCH_DATA` and `AUTORESEARCH_OUT`. It must honor
-the step budget and write artifacts to OUT. Its stdout is retained under the
+the step budget. Training writes outputs only to `AUTORESEARCH_OUT`; the worktree,
+target repository and Git metadata are read-only. Writes are allowed only in
+that run's output directory, its fresh temporary directory (`TMPDIR`), and `/dev`.
+Its stdout is retained under the
 private `runs/<run-id>/` directory and never scored. The evaluator runs in the
 private session directory with `AUTORESEARCH_ARTIFACT` and `AUTORESEARCH_SEED`.
+After training's process group is killed, regular artifacts are copied with
+no-follow semantics into a private
+`$AUTORESEARCH_SNAP_ROOT/<name>/<run-id>/` snapshot (default root above). Symlinks,
+hardlinks and special files crash the run. `AUTORESEARCH_ARTIFACT` and successful
+run records' `artifact` point to this private snapshot; each log row also records
+the reserved path as `snapshot`. Later public-output writes cannot change
+evaluation inputs. The snapshot root is excluded from training's write allowlist
+and denied to every proposer.
+An evaluator that runs candidate model code must sandbox that code with a deny
+on the session folder only, for example `wrap_argv(child_argv, [str(session_dir)])`.
+The evaluator receives the snapshot path in `AUTORESEARCH_ARTIFACT` and passes it
+to its candidate child, which can read the snapshot while private evaluator
+scripts and validation/holdout data remain denied. The evaluator parent computes
+the metric and emits the `METRIC` line.
 Only its stdout is parsed: `METRIC score=1.23`. Additional finite metrics such
 as `METRIC tokens_per_s=45000` are recorded. Stderr cannot supply a metric.
 Nonzero exits, missing/invalid primary metrics, and duplicate metrics crash.
@@ -239,16 +266,18 @@ The initial baseline uses distinct seeds and its median becomes the best.
 The selection threshold is `max(noise_k * MAD, min_gain)` in metric units;
 improvement must be strictly greater. Set a meaningful `min_gain`, including for
 deterministic targets where MAD is zero (the default is zero). A promising first
-run gets `remeasure_runs` additional fresh-seed runs. Only their combined median
-can pass the candidate's frozen threshold. A keep recomputes MAD and timeout
-from those successful runs. Hunk counts flag `multi_change`; normalized exact
+run gets `remeasure_runs` additional fresh-seed confirmation runs. Only the median
+of those confirmation runs can pass the candidate's frozen threshold; the screening
+run is logged and excluded from that median. A keep recomputes MAD and timeout
+from the confirmation runs alone. Hunk counts flag `multi_change`; normalized exact
 idea repeats flag `repeated_idea`. Both are recorded for proposer context.
 
 Timeout covers training and evaluation together and uses monotonic elapsed
 seconds. Its budget is `initial_timeout_s` until the baseline completes, then
 `timeout_factor * median(current_best_wall_times)`. Each phase runs in a fresh
 process group; the group is killed on timeout and remaining descendants are
-terminated on phase completion. Timeout and crash outcomes preserve the best
+terminated on phase completion. The Claude CLI proposer uses the same process-group
+cleanup on exit and timeout. Timeout and crash outcomes preserve the best
 and are recorded as inconclusive in `tried.md`.
 
 All core operations share an in-process lock across sessions. Before every
@@ -260,9 +289,22 @@ Calls to the low-level `runner.run` return a record and retain raw process logs;
 candidate functions log each actual run once. Scope rejections and no-change outcomes also
 get an audit row, with null seed/memory and zero wall time. The last candidate
 row carries its decision; earlier remeasurement rows remain `ok`. Returned
-candidate `metric` is the combined median, while JSONL `metric` is that row's
+candidate `metric` is the confirmation median (or screening metric for an early
+discard), while JSONL `metric` is that row's
 individual measurement. `finalize` trains the selected commit and evaluates it
 with `holdout_cmd`, without using that result for selection or changing best.
+
+Every server Git invocation disables fsmonitor, hooks, SSH commands, protocols,
+external diffs and pagers, and ignores system/global config. Before commands in
+a worktree, the server checks its regular `.git` pointer against the expected
+target metadata and verifies the absolute common Git directory. Changed metadata
+crashes the candidate with `git metadata changed` and removes its directory.
+
+On iterate, an existing unlogged `it-<n>` is recorded as `abandoned`, removed,
+and skipped. Before appending, the mutation lock protects repair of an incomplete
+final JSONL line; dropped bytes are preserved in private `log.torn`.
+Foreground MCP admission remains held until its worker finishes, including when
+the caller cancels its wait.
 
 Serialization and background-run activity are in-process only. Use one MCP
 server or foreground CLI loop at a time; a separate CLI status command reads
@@ -270,10 +312,12 @@ durable state but cannot inspect another process's run thread/error. `best.json`
 and regenerated state use atomic
 file replacement; Git ref and JSON updates are separate operations. A branch
 that disagrees with `best.json` fails visibly before further work; automatic
-interruption recovery and multi-server coordination are outside B2. Calling
+recovery of an interrupted ref/best update and multi-server coordination remain
+outside this contract. Calling
 finalize is the caller's decision to stop tuning; this library does not enforce
 a session lifecycle beyond the candidate iteration limit.
 
 See the [B2 report](wiki/B2-report.md) and [B3 report](wiki/B3-report.md) for source
 usage, validation and coordinator checks. The [Claude CLI report](wiki/claude-cli-report.md)
 records CLI/fallback checks and the live Haiku handoff.
+The [B6 report](wiki/B6-report.md) maps security and recovery fixes to regression tests.

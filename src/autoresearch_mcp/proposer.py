@@ -7,8 +7,10 @@ import math
 import os
 import re
 import shutil
+import signal
 import subprocess
 from collections.abc import Callable, Iterable
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Protocol
@@ -91,6 +93,8 @@ class SubagentProposer:
                 root = (base.expanduser() / self.session.name / uuid4().hex).resolve()
                 if root.is_relative_to(self.session.session_dir):
                     raise ValueError("subagent runtime cannot be inside the denied private session")
+                if root.is_relative_to(self.session.snapshot_dir.parent):
+                    raise ValueError("subagent runtime cannot be inside the denied snapshot root")
                 self.server = InProcessServer(session_root=root, settings=settings)
             self._started = True
             try:
@@ -120,13 +124,15 @@ class SubagentProposer:
             task=brief,
             verification="true",
             workspace=worktree,
-            deny_read=[str(session.session_dir)],
+            deny_read=session.proposer_deny_read,
         )
         try:
-            run.await_ready.wait()
-            # A human gate also wakes await_ready. Such a run is closed, never scored.
-            raw = run.final_response or run.result_text
-            state = run.state
+            if run.await_ready.wait(timeout=session.config.proposer_timeout_s):
+                # A human gate also wakes await_ready. Such a run is closed, never scored.
+                raw = run.final_response or run.result_text
+                state = run.state
+            else:
+                raw, state = "proposer timed out", "timeout"
         finally:
             self.server.close_agent(run.agent_id)
         return ProposalResult(
@@ -177,27 +183,34 @@ class ClaudeCliProposer:
             "json",
         ]
         # A wrapper error propagates: never launch an unrestricted child.
-        argv = wrap_argv(argv, [str(session.session_dir)])
+        argv = wrap_argv(argv, session.proposer_deny_read)
         try:
-            process = subprocess.run(
-                argv, cwd=str(worktree), capture_output=True, text=True, timeout=self.timeout_s
+            process = subprocess.Popen(
+                argv, cwd=str(worktree), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                stdin=subprocess.DEVNULL, text=True, start_new_session=True,
             )
+            try:
+                stdout, stderr = process.communicate(timeout=self.timeout_s)
+            finally:
+                with suppress(ProcessLookupError):
+                    os.killpg(process.pid, signal.SIGKILL)
+                process.wait()
         except subprocess.TimeoutExpired as exc:
             return ProposalResult("proposer timed out", "timeout", raw=str(exc))
         except OSError as exc:
             return ProposalResult("proposer failed", "failed", raw=str(exc))
         try:
-            payload = json.loads(process.stdout)
+            payload = json.loads(stdout)
         except json.JSONDecodeError:
             payload = None
         if not isinstance(payload, dict) or not isinstance(payload.get("result"), str):
-            raw = process.stderr or process.stdout or "Claude CLI returned no result text"
+            raw = stderr or stdout or "Claude CLI returned no result text"
             return ProposalResult("proposer failed", "failed", raw=raw)
         raw = payload["result"]
         ideas = re.findall(r"^IDEA:[ \t]*(.+)$", raw, flags=re.MULTILINE)
         idea = ideas[-1].strip() if ideas else extract_idea(raw)
         state = "failed" if process.returncode or payload.get("is_error") else "completed"
-        return ProposalResult(idea, state, raw=raw or process.stderr)
+        return ProposalResult(idea, state, raw=raw or stderr)
 
 
 class FakeProposer:

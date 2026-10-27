@@ -152,7 +152,7 @@ def test_log_rows_have_required_fields(session_factory, offline_sandbox):
     assert all(row["threshold"] == 0.5 for row in rows[3:])
     assert session.best["metric"] == 8
     assert session.best["noise_mad"] == 0
-    assert len(session.best["wall_times"]) == 4
+    assert len(session.best["wall_times"]) == session.config.remeasure_runs
     assert git(session.config.target_repo, "log", "-1", "--format=%s", session.branch) == (
         "better value"
     )
@@ -268,7 +268,7 @@ def test_best_noise_and_timeout_follow_current_best(session_factory, offline_san
     worktree = create(session, 1)
     edit_value(worktree, "int(os.environ['AUTORESEARCH_SEED'])")
     assert score_candidate(session, worktree, "variable gain")["status"] == "kept"
-    assert session.best["metric"] == 5.5
+    assert session.best["metric"] == 6
     assert session.best["noise_mad"] == 1
     assert session.best["threshold"] == 2
     import statistics

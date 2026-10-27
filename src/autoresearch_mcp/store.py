@@ -92,17 +92,25 @@ class Config:
             object.__setattr__(self, name, argv)
 
 
-def _paths(name: str, home=None, wt_root=None) -> tuple[Path, Path]:
+def _paths(name: str, home=None, wt_root=None, snap_root=None) -> tuple[Path, Path, Path]:
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", name):
         raise ValueError("session names may contain letters, digits, _ and -")
     private = Path(home or os.environ.get("AUTORESEARCH_HOME", "~/.autoresearch"))
     public = Path(wt_root or os.environ.get("AUTORESEARCH_WT_ROOT", "~/.cache/autoresearch-wt"))
-    private, public = private.expanduser().resolve(), public.expanduser().resolve()
+    snapshots = Path(
+        snap_root or os.environ.get("AUTORESEARCH_SNAP_ROOT", "~/.cache/autoresearch-snap")
+    )
+    private, public, snapshots = (
+        path.expanduser().resolve() for path in (private, public, snapshots)
+    )
     if private.is_relative_to(public) or public.is_relative_to(private):
         raise ValueError("session and workspace roots must be separate")
     if public.is_relative_to((Path.home() / ".autoresearch").resolve()):
         raise ValueError("workspaces cannot be under ~/.autoresearch")
-    return private / name, public / name
+    for root in (private, public):
+        if snapshots.is_relative_to(root) or root.is_relative_to(snapshots):
+            raise ValueError("snapshot, session and workspace roots must be separate")
+    return private / name, public / name, snapshots / name
 
 
 def _atomic_write(path: Path, content: str) -> None:
@@ -123,6 +131,7 @@ class Session:
     config: Config
     session_dir: Path
     workspace_dir: Path
+    snapshot_dir: Path
     queue: RunQueue = field(default_factory=RunQueue, repr=False)
     log_context: dict = field(default_factory=dict, repr=False)
 
@@ -135,18 +144,21 @@ class Session:
         goal: str | None = None,
         home=None,
         wt_root=None,
+        snap_root=None,
         queue: RunQueue | None = None,
     ) -> Session:
         from .worktree import start
 
-        private, public = _paths(name, home, wt_root)
+        private, public, snapshots = _paths(name, home, wt_root, snap_root)
         if config.target_repo.is_relative_to(private):
             raise ValueError("target repository cannot be inside the session")
         if goal is not None:
             config = replace(config, goal=goal)
         private.mkdir(parents=True, mode=0o700)
         public.mkdir(parents=True)
-        session = cls(name, config, private, public, queue or RunQueue())
+        snapshots.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        snapshots.mkdir(mode=0o700, exist_ok=True)
+        session = cls(name, config, private, public, snapshots, queue or RunQueue())
         data = asdict(config)
         data["target_repo"] = str(config.target_repo)
         # These fields use TOML's JSON-compatible scalar and array subset.
@@ -166,10 +178,14 @@ class Session:
         return session
 
     @classmethod
-    def load(cls, name: str, *, home=None, wt_root=None, queue=None) -> Session:
-        private, public = _paths(name, home, wt_root)
+    def load(cls, name: str, *, home=None, wt_root=None, snap_root=None, queue=None) -> Session:
+        private, public, snapshots = _paths(name, home, wt_root, snap_root)
         config = Config(**tomllib.loads((private / "config.toml").read_text()))
-        return cls(name, config, private, public, queue or RunQueue())
+        return cls(name, config, private, public, snapshots, queue or RunQueue())
+
+    @property
+    def proposer_deny_read(self) -> list[str]:
+        return [str(self.session_dir), str(self.snapshot_dir.parent)]
 
     @property
     def branch(self) -> str:
@@ -208,11 +224,22 @@ class Session:
 
     def append(self, row: dict) -> None:
         row = {"ts": datetime.now(UTC).isoformat(), **row}
-        with (self.session_dir / "log.jsonl").open("a", encoding="utf-8") as output:
-            output.write(json.dumps(row, allow_nan=False) + "\n")
-            output.flush()
-            os.fsync(output.fileno())
-        self.regenerate_state()
+        encoded = (json.dumps(row, allow_nan=False) + "\n").encode("utf-8")
+        with self.queue.lock:
+            with (self.session_dir / "log.jsonl").open("r+b") as output:
+                content = output.read()
+                if content and not content.endswith(b"\n"):
+                    boundary = content.rfind(b"\n") + 1
+                    with (self.session_dir / "log.torn").open("ab") as torn:
+                        torn.write(content[boundary:])
+                        torn.flush()
+                        os.fsync(torn.fileno())
+                    output.seek(boundary)
+                    output.truncate()
+                output.write(encoded)
+                output.flush()
+                os.fsync(output.fileno())
+            self.regenerate_state()
 
     def tried(self, iteration: int, idea: str, outcome: str) -> None:
         idea = " ".join(idea.split()).replace("|", "\\|")

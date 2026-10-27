@@ -34,7 +34,7 @@ def test_sandbox_wrapper_receives_session_path(session_factory, monkeypatch):
     session = session_factory()
     calls = []
 
-    def wrapper(argv, deny_paths):
+    def wrapper(argv, deny_paths, **kwargs):
         calls.append((argv, deny_paths))
         return argv
 
@@ -48,7 +48,7 @@ def test_sandbox_wrapper_receives_session_path(session_factory, monkeypatch):
 def test_sandbox_failure_never_falls_back(session_factory, monkeypatch):
     session = session_factory()
 
-    def unavailable(argv, deny_paths):
+    def unavailable(argv, deny_paths, **kwargs):
         raise RuntimeError("sandbox unavailable")
 
     monkeypatch.setattr("subagent.sandbox.wrap_argv", unavailable)

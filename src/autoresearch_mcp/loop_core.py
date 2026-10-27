@@ -72,12 +72,12 @@ def baseline(session: Session) -> dict:
         parent = wt.assert_best_head(session)
         records = []
         try:
-            original = wt.snapshot(path, parent)
+            original = wt.snapshot(path, parent, session)
             for index in range(session.config.baseline_runs):
                 result = run(session, path, session.next_seed())
                 if result["status"] == "ok":
                     try:
-                        if wt.snapshot(path, parent).tree != original.tree:
+                        if wt.snapshot(path, parent, session).tree != original.tree:
                             result.update(
                                 status="crash", error="baseline code changed during training"
                             )
@@ -124,7 +124,7 @@ def score_candidate(session: Session, worktree, idea: str) -> dict:
             flags.append("repeated_idea")
         try:
             try:
-                diff = wt.snapshot(path, parent)
+                diff = wt.snapshot(path, parent, session)
             except (ValueError, CalledProcessError) as exc:
                 row = _record(
                     session,
@@ -181,7 +181,12 @@ def _measure_candidate(session, path, idea, iteration, before, diff, flags, pare
             return row
 
         try:
-            unchanged = wt.snapshot(path, parent).tree == diff.tree
+            unchanged = wt.snapshot(path, parent, session).tree == diff.tree
+        except wt.GitMetadataChanged:
+            result.update(status="crash", error="git metadata changed")
+            row = _record(session, iteration, idea, "candidate", result, before, diff, flags)
+            _tried(session, iteration, idea, row["status"])
+            return row
         except (ValueError, CalledProcessError):
             unchanged = False
         if not unchanged:
@@ -199,7 +204,8 @@ def _measure_candidate(session, path, idea, iteration, before, diff, flags, pare
             _tried(session, iteration, idea, row["status"])
             return row
 
-        center = median(record["metric"] for record in records)
+        confirmed = records[1:] if index else records
+        center = median(record["metric"] for record in confirmed)
         passes = improves(center, before["metric"], before["threshold"], session.config.direction)
         last = index == session.config.remeasure_runs
         if (index == 0 and not passes) or last:
@@ -207,8 +213,10 @@ def _measure_candidate(session, path, idea, iteration, before, diff, flags, pare
             if passes:
                 try:
                     commit = wt.keep(session, path, idea, parent, diff.tree)
-                    _best(session, records, commit, iteration)
+                    _best(session, confirmed, commit, iteration)
                     result.update(status="kept", kept=True)
+                except wt.GitMetadataChanged:
+                    result.update(status="crash", error="git metadata changed")
                 except (OSError, RuntimeError, ValueError, CalledProcessError) as exc:
                     result.update(status="crash", error=f"keep failed: {exc}")
             row = _record(session, iteration, idea, "candidate", result, before, diff, flags)

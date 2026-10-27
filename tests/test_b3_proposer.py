@@ -121,7 +121,7 @@ def test_subagent_api_and_server_lifecycle(session_factory, tmp_path):
                 "task": "brief",
                 "verification": "true",
                 "workspace": tmp_path,
-                "deny_read": [str(session.session_dir)],
+                "deny_read": [str(session.session_dir), str(session.snapshot_dir.parent)],
             }
         ]
         * 2
@@ -134,7 +134,7 @@ def test_agent_closed_even_when_wait_fails(session_factory, tmp_path):
     backend = Backend(tmp_path / "trace.jsonl")
 
     class BrokenEvent:
-        def wait(self):
+        def wait(self, timeout=None):
             raise RuntimeError("wait failed")
 
     def delegate(**kwargs):

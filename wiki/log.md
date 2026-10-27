@@ -1,5 +1,11 @@
 # Log
 
+## [2026-10-27] uat | B6 fixes live-checked: e2e3 session (100 steps) baseline 3 runs + 1 codex iteration scored via snapshot root, discarded correctly; native sandbox tests pass
+
+## [2026-10-27] fix | Move snapshots to a separate AUTORESEARCH_SNAP_ROOT, deny it to proposers, preserve evaluator-child access and log snapshot paths; 154 offline tests pass, 5 native checks pending.
+
+## [2026-10-27] fix | B6 fixes restrict training writes, snapshot artifacts, harden Git, bound proposers, isolate confirmation medians, recover worktrees and logs, and retain cancelled admission. Offline: 142 passed, 3 native checks pending.
+
 ## [2026-10-27] uat | Haiku CLI proposer live smoke: kept change score 30->0 after 3 re-measures; next iteration no_change. Smoke script now honours claude-cli providers.
 
 ## [2026-10-27] build | Added sandboxed Claude CLI Haiku proposer and one-shot failure fallback; offline tests 116 passed, one skipped; live acceptance and independent review pending.

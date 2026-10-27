@@ -119,3 +119,57 @@ distinct call IDs. Final reports deduplicate these IDs across remeasurements,
 including primary failures. Rejected approaches: an API-key-only adapter,
 unrestricted execution after a wrapper failure, retries on no-change or
 discard, and scoring a combination of failed primary edits and fallback edits.
+
+## B6
+
+Grounded: searched the whole project wiki for trust, sandbox, recovery,
+cancellation, median, Git and lock contracts; used the requested repo files
+and the read-only sibling sandbox wrapper. Books: none.
+Pattern: coordinator-direct; changes share a small set of boundaries and have
+fixed, executable acceptance criteria. No agent delegation was needed.
+
+- Authorization/identity: candidate-controlled paths and config must not select
+  server Git metadata or execute hooks. Pin Git config, verify the pointer before
+  Git, and verify the common directory before worktree operations. Proving tests:
+  test_git_helper_disables_execution_config and
+  test_changed_git_metadata_crashes_before_scope_check.
+- Effects across the trust boundary: candidate output must not alias private
+  evaluation data. Restrict training writes and evaluate a private no-follow copy
+  of singly linked regular files after process-group cleanup. Proving tests:
+  test_training_write_allow_and_fresh_tmpdir,
+  test_artifact_links_and_special_files_crash and
+  test_detached_writer_cannot_change_private_artifact_snapshot.
+- Failure/restart state: abandoned unlogged worktrees consume an iteration;
+  incomplete audit bytes remain recoverable in log.torn. Proving tests:
+  test_resume_abandons_unlogged_worktrees and
+  test_append_repairs_torn_tail_repeatedly_under_lock; both repeat recovery.
+- Guarantee reachability: caller cancellation must not admit overlapping
+  mutation while an executor worker remains active. The worker owns release;
+  its shielded future survives caller cancellation. Proving test:
+  test_cancelled_foreground_call_holds_admission_until_worker_exits.
+- Measurement units: keep thresholds remain in evaluator metric units and use
+  only confirmation scores; the screening metric stays in JSONL. Proving tests:
+  test_confirmation_median_excludes_screening_run and
+  test_kept_best_statistics_use_confirmations_only.
+
+Rejected approaches: scope checks after following a candidate .git pointer,
+evaluating public artifacts in place, a screening-inclusive median, reusing an
+unlogged iteration path, appending past torn bytes, or releasing admission in
+the cancelled caller. Native checks remain marked for coordinator execution.
+
+### B6 live evaluator snapshot correction
+
+Context: the coordinator's live evaluator sandboxes candidate model code with
+the session folder denied. Session-local snapshots therefore caused EOFError.
+Decision: place snapshots under a third, disjoint root with environment/library
+overrides; the evaluator child can read it while both proposer adapters deny the
+whole root. Keep training's write allowlist unchanged and retain the no-follow
+copy. The live evaluator supplied by the user was read to confirm this boundary.
+Proving tests: test_evaluator_child_reads_external_snapshot_and_logs_path,
+test_snapshot_root_overlap_rejected_on_create_and_load,
+test_subagent_api_and_server_lifecycle, and
+test_claude_cli_argv_is_wrapped_and_uses_worktree. Native proof:
+test_native_evaluator_child_reads_snapshot_but_cannot_read_session and
+test_native_proposer_snapshot_deny_blocks_reads_and_writes.
+Rejected approach: allowing candidate model code to read the session directory
+just to reach its artifact. This would also expose evaluator data.

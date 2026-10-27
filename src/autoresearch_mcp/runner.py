@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import errno
 import math
 import os
 import re
+import shutil
 import signal
+import stat
 import subprocess
+import tempfile
 import time
 from contextlib import suppress
 from pathlib import Path
@@ -58,6 +62,45 @@ def _process(argv: list[str], cwd: Path, env: dict, deadline: float, output: Pat
             process.wait()
 
 
+def _snapshot_artifacts(source: Path, destination: Path) -> None:
+    """Copy through directory descriptors so no source link is ever followed."""
+    error = "artifact contains a link or special file"
+
+    def copy_entry(parent_fd, name, target):
+        info = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+        directory = stat.S_ISDIR(info.st_mode)
+        if not directory and (not stat.S_ISREG(info.st_mode) or info.st_nlink != 1):
+            raise ValueError(error)
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+        if directory:
+            flags |= os.O_DIRECTORY
+        fd = os.open(name, flags, dir_fd=parent_fd)
+        try:
+            opened = os.fstat(fd)
+            if (opened.st_dev, opened.st_ino, opened.st_mode, opened.st_nlink) != (
+                info.st_dev, info.st_ino, info.st_mode, info.st_nlink
+            ):
+                raise ValueError(error)
+            if directory:
+                target.mkdir(mode=0o700)
+                for child in os.listdir(fd):
+                    copy_entry(fd, child, target / child)
+            else:
+                with os.fdopen(os.dup(fd), "rb") as src, target.open("xb") as dst:
+                    shutil.copyfileobj(src, dst)
+                if os.fstat(fd).st_nlink != 1:
+                    raise ValueError(error)
+        finally:
+            os.close(fd)
+
+    try:
+        copy_entry(None, str(source), destination)
+    except OSError as exc:
+        if exc.errno in {errno.ELOOP, errno.ENOTDIR}:
+            raise ValueError(error) from None
+        raise
+
+
 def run(session: Session, worktree: Path, seed: int, *, holdout: bool = False) -> dict:
     """Run one gated train+eval pair; wall_s excludes waiting for memory/the lock."""
     command = session.config.holdout_cmd if holdout else session.config.eval_cmd
@@ -70,6 +113,7 @@ def run(session: Session, worktree: Path, seed: int, *, holdout: bool = False) -
         run_id = f"{seed}-{uuid4().hex}"
         artifact = session.workspace_dir / "artifacts" / run_id
         logs = session.session_dir / "runs" / run_id
+        snapshot = session.snapshot_dir / run_id
         artifact.mkdir()
         logs.mkdir(parents=True)
         record = dict(
@@ -79,6 +123,7 @@ def run(session: Session, worktree: Path, seed: int, *, holdout: bool = False) -
             seed=seed,
             run_id=run_id,
             artifact=str(artifact),
+            snapshot=str(snapshot),
             timeout_s=timeout,
         )
         env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1", "AUTORESEARCH_SEED": str(seed)}
@@ -89,18 +134,26 @@ def run(session: Session, worktree: Path, seed: int, *, holdout: bool = False) -
             "AUTORESEARCH_OUT": str(artifact),
         }
         try:
-            argv = subagent.sandbox.wrap_argv(
-                list(session.config.train_cmd),
-                [str(session.session_dir)],
-            )
-            train_rc = _process(argv, worktree, train_env, started + timeout, logs / "train.stdout")
+            with tempfile.TemporaryDirectory(prefix="autoresearch-") as temporary:
+                train_env["TMPDIR"] = temporary
+                argv = subagent.sandbox.wrap_argv(
+                    list(session.config.train_cmd),
+                    [str(session.session_dir)],
+                    write_allow=[str(artifact), temporary, "/dev"],
+                )
+                train_rc = _process(
+                    argv, worktree, train_env, started + timeout, logs / "train.stdout"
+                )
             if train_rc:
                 record["error"] = f"train exited with code {train_rc}"
             else:
+                snapshot.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+                _snapshot_artifacts(artifact, snapshot)
+                record["artifact"] = str(snapshot)
                 eval_rc = _process(
                     list(command),
                     session.session_dir,
-                    {**env, "AUTORESEARCH_ARTIFACT": str(artifact)},
+                    {**env, "AUTORESEARCH_ARTIFACT": str(snapshot)},
                     started + timeout,
                     logs / "eval.stdout",
                 )

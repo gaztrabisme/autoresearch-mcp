@@ -97,14 +97,12 @@ def create_server(manager: RunManager | None = None) -> MCPServer:
     @app.tool(name="baseline")
     async def baseline(name: str) -> dict:
         """Measure the committed target with baseline_runs fresh seeds; waits for completion."""
-        with manager.exclusive():
-            return await asyncio.to_thread(loop_core.baseline, Session.load(name))
+        return await manager.foreground(loop_core.baseline, Session.load(name))
 
     @app.tool(name="iterate")
     async def iterate(name: str) -> dict:
         """Propose and score one iteration; waits for its final decision."""
-        with manager.exclusive():
-            return await asyncio.to_thread(loop.iterate, Session.load(name))
+        return await manager.foreground(loop.iterate, Session.load(name))
 
     @app.tool(name="run")
     def run(
@@ -137,9 +135,8 @@ def create_server(manager: RunManager | None = None) -> MCPServer:
     @app.tool(name="finalize")
     async def finalize(name: str) -> dict:
         """Evaluate the selected best on held-out data and write the final report."""
-        with manager.exclusive():
-            path = await asyncio.to_thread(loop.finalize, Session.load(name), print_path=False)
-            return {"report_path": str(path), "report": path.read_text()}
+        path = await manager.foreground(loop.finalize, Session.load(name), print_path=False)
+        return {"report_path": str(path), "report": path.read_text()}
 
     return app
 

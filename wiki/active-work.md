@@ -10,10 +10,20 @@ records 81 passed, one expected macos_sandbox skip and a passing Ruff check usin
 the project venv (MCP 2.3.0). The earlier system-Python validation is superseded.
 No live provider call was made here.
 
-Next: coordinator runs `uv run pytest -q`, `uv run ruff check`, then
-`scripts/smoke_live.py --provider codex` outside this environment. The requested
-`.venv/bin/python -m pytest -q` and `.venv/bin/ruff check` both passed here.
-Independent review remains deferred following the B2 review-tool rejection.
+The [Claude CLI report](claude-cli-report.md) adds a local Claude proposer with
+`provider = "claude-cli:haiku"`, optional `fallback_provider`, a configurable
+600-second proposer timeout, and per-attempt audit metadata. Failed primary
+edits are removed before a single fallback retry of the same iteration.
+No-change, incomplete and scored outcomes do not retry. Current evidence:
+116 passed, one sandbox-dependent skip in 44.84 s with
+`UV_CACHE_DIR=.cache/uv uv run --no-sync pytest -q`; Ruff passes. The default uv
+cache could not be opened from this environment. Independent review was
+rejected by automatic approval review and remains deferred.
+
+Next: coordinator reviews the change, runs `uv run pytest -q`,
+`uv run ruff check`, then a live `autoresearch iterate <session>` with
+`provider = "claude-cli:haiku"` outside this environment. The existing
+`scripts/smoke_live.py --provider codex` remains a subagent-specific smoke.
 
 Standing assumptions: trainers honor AUTORESEARCH_STEPS and write artifacts to
 OUT; evaluator scripts are trusted; v1 has one server process, one best branch,

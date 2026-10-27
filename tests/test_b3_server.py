@@ -33,9 +33,16 @@ def test_mcp_server_lists_seven_tools():
         "finalize",
     }
     init = next(tool for tool in tools if tool.name == "init")
-    assert {"scope", "target_repo", "noise_k", "provider", "plateau_limit", "holdout_cmd"} <= (
-        init.input_schema["properties"].keys()
-    )
+    assert {
+        "scope",
+        "target_repo",
+        "noise_k",
+        "provider",
+        "plateau_limit",
+        "holdout_cmd",
+        "fallback_provider",
+        "proposer_timeout_s",
+    } <= (init.input_schema["properties"].keys())
 
 
 def test_run_refuses_a_second_concurrent_run(session_factory, offline_sandbox):

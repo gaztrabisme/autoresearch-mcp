@@ -31,7 +31,7 @@ def build_brief(session: Session, worktree: Path) -> str:
         "Matching files:\n" + "\n".join(f"- {file}" for file in files) + "\n\n"
         "Rules:\n"
         "- edit only in-scope files; make ONE change.\n"
-        "- read with cat/head/rg only.\n"
+        "- read with the Read tool or cat/head/rg only.\n"
         "- no git, no python -c, no network, no package installs.\n"
         "- do not try to run training (the server does).\n"
         "- Never call autoresearch MCP tools or inspect evaluator/validation/holdout data.\n"

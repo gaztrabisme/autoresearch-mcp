@@ -31,6 +31,9 @@ def _record(session, iteration, idea, phase, result, before, diff=None, flags=()
         "flags": list(flags),
         "proposer_state": None,
         "denials": 0,
+        "proposer": None,
+        "fallback_used": False,
+        "proposer_attempts": [],
         **session.log_context,
         **result,
     }

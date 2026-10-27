@@ -181,21 +181,25 @@ def test_invalid_plateau_limit_is_rejected(session_factory, value):
 
 
 def test_run_starts_and_stops_one_proposer_runtime(session_factory, offline_sandbox, monkeypatch):
-    from contextlib import contextmanager
-
     session = session_factory()
     baseline(session)
     events = []
 
-    @contextmanager
-    def runtime(session):
-        events.append("start")
-        try:
-            yield fake_values(8, 12)
-        finally:
+    class Runtime:
+        def __init__(self, session, *, provider):
+            self.fake = fake_values(8, 12)
+            self.started = False
+
+        def propose(self, *args):
+            if not self.started:
+                events.append("start")
+                self.started = True
+            return self.fake.propose(*args)
+
+        def close(self):
             events.append("stop")
 
-    monkeypatch.setattr(loop, "SubagentProposer", runtime)
+    monkeypatch.setattr(loop, "SubagentProposer", Runtime)
     assert loop.run(session, 2, 60)["iterations"] == 2
     assert events == ["start", "stop"]
 

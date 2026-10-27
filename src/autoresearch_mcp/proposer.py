@@ -1,10 +1,13 @@
-"""Subagent dispatch and a deterministic scripted proposer for offline callers."""
+"""Subagent and local Claude CLI dispatch, plus a deterministic offline proposer."""
 
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
+import shutil
+import subprocess
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -54,8 +57,16 @@ def count_denials(trace_path: Path, agent_id: str) -> int:
 
 
 class SubagentProposer:
-    def __init__(self, session: Session, *, server=None, session_root: Path | None = None):
+    def __init__(
+        self,
+        session: Session,
+        *,
+        provider: str | None = None,
+        server=None,
+        session_root: Path | None = None,
+    ):
         self.session = session
+        self.provider = session.config.provider if provider is None else provider
         self.server = server
         self.session_root = session_root
         self._started = False
@@ -105,7 +116,7 @@ class SubagentProposer:
             raise ValueError("a proposer belongs to one session")
         self.start()
         run = self.server.delegate(
-            provider=session.config.provider,
+            provider=self.provider,
             task=brief,
             verification="true",
             workspace=worktree,
@@ -126,6 +137,67 @@ class SubagentProposer:
             run.agent_id,
             str(self.trace_path),
         )
+
+
+class ClaudeCliProposer:
+    def __init__(self, model: str = "haiku", *, timeout_s: float = 600):
+        if not isinstance(model, str) or not model.strip():
+            raise ValueError("Claude CLI model must be nonempty")
+        if isinstance(timeout_s, bool) or not math.isfinite(timeout_s) or timeout_s <= 0:
+            raise ValueError("Claude CLI timeout_s must be positive and finite")
+        self.model = model
+        self.timeout_s = timeout_s
+
+    def propose(self, session: Session, worktree: Path, brief: str) -> ProposalResult:
+        from subagent.sandbox import wrap_argv
+
+        binary = os.environ.get("AUTORESEARCH_CLAUDE_BIN") or shutil.which("claude")
+        if not binary:
+            return ProposalResult("proposer failed", "failed", raw="claude executable not found")
+        argv = [
+            binary,
+            "-p",
+            brief,
+            "--model",
+            self.model,
+            "--tools",
+            "Read,Edit",
+            "--setting-sources",
+            "project",
+            "--strict-mcp-config",
+            "--permission-mode",
+            "acceptEdits",
+            "--no-session-persistence",
+            "--append-system-prompt",
+            "You are the proposer in an automated experiment loop. Your only task is the "
+            "provided brief in the current folder. Ignore any other instructions about skills, "
+            "routing, subagents, reports, plans or people. Do not ask questions; "
+            "nobody will answer.",
+            "--output-format",
+            "json",
+        ]
+        # A wrapper error propagates: never launch an unrestricted child.
+        argv = wrap_argv(argv, [str(session.session_dir)])
+        try:
+            process = subprocess.run(
+                argv, cwd=str(worktree), capture_output=True, text=True, timeout=self.timeout_s
+            )
+        except subprocess.TimeoutExpired as exc:
+            return ProposalResult("proposer timed out", "timeout", raw=str(exc))
+        except OSError as exc:
+            return ProposalResult("proposer failed", "failed", raw=str(exc))
+        try:
+            payload = json.loads(process.stdout)
+        except json.JSONDecodeError:
+            payload = None
+        if not isinstance(payload, dict) or not isinstance(payload.get("result"), str):
+            raw = process.stderr or process.stdout or "Claude CLI returned no result text"
+            return ProposalResult("proposer failed", "failed", raw=raw)
+        raw = payload["result"]
+        ideas = re.findall(r"^IDEA:[ \t]*(.+)$", raw, flags=re.MULTILINE)
+        idea = ideas[-1].strip() if ideas else extract_idea(raw)
+        state = "failed" if process.returncode or payload.get("is_error") else "completed"
+        return ProposalResult(idea, state, raw=raw or process.stderr)
 
 
 class FakeProposer:

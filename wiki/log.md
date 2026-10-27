@@ -1,5 +1,9 @@
 # Log
 
+## [2026-10-27] uat | Haiku CLI proposer live smoke: kept change score 30->0 after 3 re-measures; next iteration no_change. Smoke script now honours claude-cli providers.
+
+## [2026-10-27] build | Added sandboxed Claude CLI Haiku proposer and one-shot failure fallback; offline tests 116 passed, one skipped; live acceptance and independent review pending.
+
 ## [2026-10-27] init | Repo created for the autoresearch MCP server (plan: ~/.claude/plans/1-ok-2-ok-fluttering-raven.md)
 
 ## [2026-10-27] build | B2 sequential experiment-loop library

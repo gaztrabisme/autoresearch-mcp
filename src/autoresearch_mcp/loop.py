@@ -1,4 +1,4 @@
-"""Propose/score orchestration; one runtime and one current best per loop."""
+"""Propose/score orchestration with reusable providers and one current best."""
 
 from __future__ import annotations
 
@@ -9,20 +9,36 @@ from uuid import uuid4
 
 from . import loop_core, worktree
 from .brief import build_brief
-from .proposer import ProposalResult, Proposer, SubagentProposer
+from .proposer import ClaudeCliProposer, ProposalResult, Proposer, SubagentProposer
 from .store import Session
 
 
 @contextmanager
-def _using_proposer(session, proposer):
+def _using_proposer(session, proposer, *, provider=None):
     if proposer is not None:
         yield proposer  # Injected instances belong to the caller, including protocol-only fakes.
     else:
-        with SubagentProposer(session) as owned:
+        provider = session.config.provider if provider is None else provider
+        if provider.startswith("claude-cli:"):
+            yield ClaudeCliProposer(
+                model=provider.removeprefix("claude-cli:"),
+                timeout_s=session.config.proposer_timeout_s,
+            )
+            return
+        # Startup belongs to propose(), inside iterate's failure/fallback handling.
+        owned = SubagentProposer(session, provider=provider)
+        try:
             yield owned
+        finally:
+            owned.close()
 
 
 def iterate(session: Session, *, proposer: Proposer | None = None, cancelled=None) -> dict:
+    with ExitStack() as stack:
+        return _iterate(session, proposer, cancelled, stack, {})
+
+
+def _iterate(session, proposer, cancelled, stack, cache):
     with session.queue.lock:
         if not session.best:
             raise ValueError("run baseline before iterating")
@@ -35,17 +51,53 @@ def iterate(session: Session, *, proposer: Proposer | None = None, cancelled=Non
         path = worktree.create(session, iteration)
         previous = session.log_context
         session.log_context = {
-            "proposer_call_id": uuid4().hex,
             "proposal_memory_free_pct": free,
+            "fallback_used": False,
+            "proposer_attempts": [],
         }
         try:
-            try:
-                with _using_proposer(session, proposer) as active:
-                    proposal = active.propose(session, path, build_brief(session, path))
-                error = None
-            except Exception as exc:
-                error = f"{type(exc).__name__}: {exc}"
-                proposal = ProposalResult("proposer failed", "failed", raw=error)
+            brief = build_brief(session, path)
+            providers = [session.config.provider]
+            if session.config.fallback_provider:
+                providers.append(session.config.fallback_provider)
+            for attempt, provider in enumerate(providers):
+                call_id = uuid4().hex
+                try:
+                    if attempt == 0 and proposer is not None:
+                        active = proposer
+                    else:
+                        key = (attempt, provider)
+                        if key not in cache:
+                            cache[key] = stack.enter_context(
+                                _using_proposer(session, None, provider=provider)
+                            )
+                        active = cache[key]
+                    proposal = active.propose(session, path, brief)
+                    error = None
+                except Exception as exc:
+                    error = f"{type(exc).__name__}: {exc}"
+                    proposal = ProposalResult("proposer failed", "failed", raw=error)
+                failed = proposal.run_state in {"failed", "cancelled", "timeout"}
+                session.log_context.update(
+                    proposer=provider, fallback_used=bool(attempt), proposer_call_id=call_id
+                )
+                session.log_context["proposer_attempts"].append(
+                    {
+                        "provider": provider,
+                        "proposer_call_id": call_id,
+                        "run_state": proposal.run_state,
+                        "idea": proposal.idea,
+                        "error": (error or proposal.raw) if failed else None,
+                        "denials": proposal.denials,
+                        "agent_id": proposal.agent_id,
+                        "trace_path": proposal.trace_path,
+                    }
+                )
+                if not failed or attempt == len(providers) - 1:
+                    break
+                # Discard even untracked partial edits before retrying the same iteration.
+                worktree.remove(session, path)
+                path = worktree.create(session, iteration)
             session.log_context.update(
                 proposer_state=proposal.run_state,
                 denials=proposal.denials,
@@ -127,15 +179,13 @@ def run(
     completed = keeps = 0
     reason = "max_iter"
     with ExitStack() as stack:
-        active = proposer
+        cache = {}
         for _ in range(count):
             reason = stop_reason()
             if reason:
                 break
-            if active is None:
-                active = stack.enter_context(SubagentProposer(session))
             try:
-                result = iterate(session, proposer=active, cancelled=stop_reason)
+                result = _iterate(session, proposer, stop_reason, stack, cache)
             except InterruptedError:
                 reason = stop_reason() or "stop"
                 break

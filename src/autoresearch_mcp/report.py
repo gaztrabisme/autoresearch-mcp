@@ -27,7 +27,9 @@ def write_report(session, heldout):
     for iteration, measurements in groups.items():
         final = measurements[-1]
         if final.get("proposer_call_id"):
-            calls[final["proposer_call_id"]] = final.get("denials", 0)
+            attempts = final.get("proposer_attempts") or [final]
+            for attempt in attempts:
+                calls[attempt["proposer_call_id"]] = attempt.get("denials", 0)
         if final["kept"]:
             values = [row["metric"] for row in measurements if row["metric"] is not None]
             center = median(values)

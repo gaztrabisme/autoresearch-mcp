@@ -72,6 +72,17 @@ def main():
     result = baseline(session)
     if result["status"] != "baseline":
         raise RuntimeError(f"baseline failed: {result}")
+    if args.provider.startswith("claude-cli:"):
+        # The loop selects the CLI proposer from config; there is no subagent trace.
+        for _ in range(2):
+            before = len(session.rows())
+            loop.iterate(session)
+            for row in session.rows()[before:]:
+                print(
+                    json.dumps({key: row[key] for key in ("status", "metric", "idea", "denials")}),
+                    flush=True,
+                )
+        return
     with SubagentProposer(session, session_root=root / "subagent") as proposer:
         for _ in range(2):
             before = len(session.rows())

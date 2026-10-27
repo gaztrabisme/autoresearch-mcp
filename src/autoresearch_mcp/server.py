@@ -58,6 +58,8 @@ def create_server(manager: RunManager | None = None) -> MCPServer:
         holdout_cmd: list[str] | str | None = None,
         goal: str = "",
         plateau_limit: int = 10,
+        fallback_provider: str = "",
+        proposer_timeout_s: float = 600.0,
     ) -> dict:
         """Pre-register all configuration and create the private session and Git branch."""
         with manager.exclusive():
@@ -81,6 +83,8 @@ def create_server(manager: RunManager | None = None) -> MCPServer:
                 holdout_cmd=holdout_cmd or [],
                 goal=goal,
                 plateau_limit=plateau_limit,
+                fallback_provider=fallback_provider,
+                proposer_timeout_s=proposer_timeout_s,
             )
             session = Session.create(name, config)
             return {

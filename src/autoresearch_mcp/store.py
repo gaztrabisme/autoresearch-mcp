@@ -38,6 +38,8 @@ class Config:
     holdout_cmd: list[str] | str = field(default_factory=list)
     goal: str = ""
     plateau_limit: int = 10
+    fallback_provider: str = ""
+    proposer_timeout_s: float = 600.0
 
     def __post_init__(self):
         object.__setattr__(self, "target_repo", Path(self.target_repo).expanduser().resolve())
@@ -49,9 +51,31 @@ class Config:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value < 1:
                 raise ValueError(f"{name} must be a positive integer")
-        for name in ("noise_k", "min_gain", "timeout_factor", "initial_timeout_s"):
+        for name in (
+            "noise_k",
+            "min_gain",
+            "timeout_factor",
+            "initial_timeout_s",
+            "proposer_timeout_s",
+        ):
             value = getattr(self, name)
-            if not math.isfinite(value) or value < 0 or ("timeout" in name and value == 0):
+            if (
+                isinstance(value, bool)
+                or not math.isfinite(value)
+                or value < 0
+                or ("timeout" in name and value == 0)
+            ):
+                raise ValueError(f"invalid {name}")
+        for name in ("provider", "fallback_provider"):
+            value = getattr(self, name)
+            if (
+                not isinstance(value, str)
+                or "\0" in value
+                or (
+                    value.startswith("claude-cli:")
+                    and not value.removeprefix("claude-cli:").strip()
+                )
+            ):
                 raise ValueError(f"invalid {name}")
         if not 0 <= self.memory_free_min_pct <= 100:
             raise ValueError("memory_free_min_pct must be in [0, 100]")

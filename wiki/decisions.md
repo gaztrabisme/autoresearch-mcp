@@ -100,3 +100,22 @@ app.tool, app.run and ToolError pattern. Port the existing schema, result and
 stdio assertions to MCP 2 and run the entire suite with .venv/bin/python plus
 .venv/bin/ruff. The original system-interpreter pass is superseded as acceptance
 evidence. No dependency was added or pinned back to MCP 1.
+
+## Claude CLI and fallback
+
+Context: the provider lanes cannot currently supply a working proposer, and the
+lane environment has no Anthropic API key. Decision: `claude-cli:<model>` runs
+the locally authenticated Claude CLI with the spike's working flags, through
+the same private-session deny wrapper. A named subagent provider still selects
+its configured lane. `fallback_provider` is empty by default; when configured,
+only failed/cancelled/timeout or raised primary attempts retry once, from a
+clean worktree at the same iteration. No-change, unfinished and scored outcomes
+retain their normal decisions. Tests and limitations are in the
+[Claude CLI report](claude-cli-report.md).
+
+Each row's `proposer` identifies the effective provider; `fallback_used` records
+whether the retry ran; `proposer_attempts` preserves both attempts and their
+distinct call IDs. Final reports deduplicate these IDs across remeasurements,
+including primary failures. Rejected approaches: an API-key-only adapter,
+unrestricted execution after a wrapper failure, retries on no-change or
+discard, and scoring a combination of failed primary edits and fallback edits.

@@ -22,9 +22,12 @@ the installed console commands in this shell:
 export PATH="$PWD/.venv/bin:$PATH"
 ```
 
-Configure the chosen provider in subagent before running proposals. Provider
-names, such as `codex`, refer to that configuration; autoresearch does not choose
-or replace its model. A Codex provider needs its CLI installed and signed in.
+There are two proposer kinds. A provider name such as `codex` uses the matching
+subagent configuration and its configured model. Configure it in subagent before
+running proposals; a Codex provider needs its CLI installed and signed in.
+`provider = "claude-cli:haiku"` instead runs the local `claude` CLI with its
+existing login, selecting the model after `claude-cli:`. It requires no Anthropic
+API key. The executable comes from `AUTORESEARCH_CLAUDE_BIN`, or `claude` on PATH.
 
 Register the stdio server with Claude Code:
 
@@ -76,6 +79,8 @@ max_iter = 100
 plateau_limit = 10
 memory_free_min_pct = 20.0
 provider = "codex"
+fallback_provider = "claude-cli:haiku" # Optional; empty or omitted disables fallback.
+proposer_timeout_s = 600.0           # Claude CLI timeout, independent of train/eval.
 train_cmd = ["python3", "train.py"]
 eval_cmd = ["python3", "eval.py"]
 holdout_cmd = ["python3", "holdout.py"]
@@ -110,8 +115,9 @@ The report contains baseline/final metrics, keep ideas and gains, non-keep count
 by status, held-out result, noise history and deduplicated proposer-call/denial
 totals. Held-out scores never enter keep decisions.
 
-Each full `run` owns one started/stopped `InProcessServer`; each proposal gets
-one agent, which is closed after its run. Standalone `iterate` owns one runtime.
+For subagent providers, each full `run` reuses one `InProcessServer` per selected
+provider role (primary or fallback); each proposal gets one agent, which is
+closed after its run. Standalone `iterate` owns its selected runtimes.
 Library callers can share an explicit `with SubagentProposer(session)` across
 several iterations; injected proposer instances remain caller-owned. Runtime
 files live under subagent's configured `session_root/autoresearch/<name>/<id>`,
@@ -121,15 +127,39 @@ change the base. Its `trace_path` identifies trace.jsonl; rows with kind=verdict
 matching agent_id and action=deny supply the denial count. Trace writing is
 enabled for these runtimes even when the general subagent config disables it.
 
+The Claude CLI proposer runs in the iteration worktree, wrapped by
+`subagent.sandbox.wrap_argv(argv, [session_dir])` to deny private-session access.
+It uses the spike's working flags: `-p <brief> --model <model> --tools Read,Edit
+--setting-sources project --strict-mcp-config --permission-mode acceptEdits
+--no-session-persistence --append-system-prompt <focused instructions>
+--output-format json`. Its deadline is `proposer_timeout_s` (600 seconds by
+default); library callers can use `ClaudeCliProposer(model="haiku", timeout_s=600)`.
+The result's `IDEA:` line supplies the idea. CLI denial counts are recorded as
+zero; this adapter does not collect subagent guard traces. **Known spike finding:
+`claude -p` loads the user's global `~/.claude/CLAUDE.md`, even with
+`--setting-sources project`.** The focused appended system prompt directs the
+proposer to follow the experiment brief.
+
+`fallback_provider` accepts either proposer kind, including subagent provider
+names. If the primary fails, is cancelled, times out, or raises during creation
+or startup, the same iteration retries once using the fallback. Partial primary
+edits are removed and the fallback starts at the current best in a fresh
+worktree at the same path. Completed proposals with `no_change`, scored discards
+and unfinished human gates do not trigger fallback. A fallback failure ends the
+iteration as `proposer_error`.
+
 The brief includes the full tried list, scope matches, best/threshold and recent
-state. It asks for one in-scope edit, reads through cat/head/rg only, no git,
+state. It asks for one in-scope edit, reads through Read or cat/head/rg only, no git,
 python -c, network, package installs or training, and a final `IDEA: <one line>`.
 Subagent verification is `true`; the server checks the diff and edit scope.
 Both completed and completed_unverified proposals proceed to that check. An
 empty diff is logged as `no_change` without training. Failed/cancelled/timeout
 proposals are `proposer_error`; unfinished human gates are `proposer_incomplete`
-and are never scored. All remeasurement rows retain proposer metadata; totals
-count each proposer_call_id once.
+and are never scored. Each audit row identifies the effective `proposer`, a
+boolean `fallback_used`, and `proposer_attempts` containing each attempted
+provider, state, idea, error, denials, call ID and any agent/trace identifiers.
+All remeasurement rows retain this metadata; report totals count each attempt's
+`proposer_call_id` once, including failed primaries.
 
 Run the live smoke only in an environment that permits real sandbox-exec,
 approval sockets and provider login:
@@ -245,4 +275,5 @@ finalize is the caller's decision to stop tuning; this library does not enforce
 a session lifecycle beyond the candidate iteration limit.
 
 See the [B2 report](wiki/B2-report.md) and [B3 report](wiki/B3-report.md) for source
-usage, validation and coordinator checks.
+usage, validation and coordinator checks. The [Claude CLI report](wiki/claude-cli-report.md)
+records CLI/fallback checks and the live Haiku handoff.

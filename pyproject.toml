@@ -1,0 +1,32 @@
+[project]
+name = "autoresearch-mcp"
+version = "0.1.0"
+description = "Core of a sequential, evaluator-scored autonomous experiment loop"
+requires-python = ">=3.11"
+dependencies = ["subagent"]
+
+[tool.uv.sources]
+subagent = { path = "../subagent-mcp-wt/autoresearch-aware", editable = true }
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/autoresearch_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--basetemp=.cache/pytest"
+pythonpath = ["src", "../subagent-mcp-wt/autoresearch-aware/src"]
+markers = ["macos_sandbox: requires a working macOS sandbox-exec (including nested use)"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]

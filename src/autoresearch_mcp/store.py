@@ -1,0 +1,209 @@
+"""Private session records and separately located, sandbox-readable workspaces."""
+
+from __future__ import annotations
+
+import json
+import math
+import os
+import re
+import shlex
+import tomllib
+from dataclasses import asdict, dataclass, field, replace
+from datetime import UTC, datetime
+from pathlib import Path
+from statistics import median
+from uuid import uuid4
+
+from .queue import RunQueue
+
+
+@dataclass(frozen=True)
+class Config:
+    target_repo: Path
+    scope: list[str]
+    train_cmd: list[str] | str
+    eval_cmd: list[str] | str
+    metric: str = "score"
+    direction: str = "min"
+    steps: int = 100
+    noise_k: float = 2.0
+    min_gain: float = 0.0
+    baseline_runs: int = 5
+    remeasure_runs: int = 3
+    timeout_factor: float = 2.0
+    initial_timeout_s: float = 60.0
+    max_iter: int = 100
+    memory_free_min_pct: float = 20.0
+    provider: str = ""
+    holdout_cmd: list[str] | str = field(default_factory=list)
+    goal: str = ""
+
+    def __post_init__(self):
+        object.__setattr__(self, "target_repo", Path(self.target_repo).expanduser().resolve())
+        if self.direction not in {"min", "max"}:
+            raise ValueError("direction must be min or max")
+        if not re.fullmatch(r"[A-Za-z_][\w./-]*", self.metric):
+            raise ValueError("invalid metric name")
+        for name in ("steps", "baseline_runs", "remeasure_runs", "max_iter"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+                raise ValueError(f"{name} must be a positive integer")
+        for name in ("noise_k", "min_gain", "timeout_factor", "initial_timeout_s"):
+            value = getattr(self, name)
+            if not math.isfinite(value) or value < 0 or ("timeout" in name and value == 0):
+                raise ValueError(f"invalid {name}")
+        if not 0 <= self.memory_free_min_pct <= 100:
+            raise ValueError("memory_free_min_pct must be in [0, 100]")
+        for pattern in self.scope:
+            if not pattern or Path(pattern).is_absolute() or ".." in Path(pattern).parts:
+                raise ValueError("scope globs must be relative and cannot contain ..")
+        for name in ("train_cmd", "eval_cmd", "holdout_cmd"):
+            value = getattr(self, name)
+            argv = shlex.split(value) if isinstance(value, str) else list(value)
+            if (name != "holdout_cmd" and not argv) or any(
+                not isinstance(arg, str) or "\0" in arg for arg in argv
+            ):
+                raise ValueError(f"invalid {name}")
+            object.__setattr__(self, name, argv)
+
+
+def _paths(name: str, home=None, wt_root=None) -> tuple[Path, Path]:
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]*", name):
+        raise ValueError("session names may contain letters, digits, _ and -")
+    private = Path(home or os.environ.get("AUTORESEARCH_HOME", "~/.autoresearch"))
+    public = Path(wt_root or os.environ.get("AUTORESEARCH_WT_ROOT", "~/.cache/autoresearch-wt"))
+    private, public = private.expanduser().resolve(), public.expanduser().resolve()
+    if private.is_relative_to(public) or public.is_relative_to(private):
+        raise ValueError("session and workspace roots must be separate")
+    if public.is_relative_to((Path.home() / ".autoresearch").resolve()):
+        raise ValueError("workspaces cannot be under ~/.autoresearch")
+    return private / name, public / name
+
+
+def _atomic_write(path: Path, content: str) -> None:
+    temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
+    try:
+        with temporary.open("x", encoding="utf-8") as output:
+            output.write(content)
+            output.flush()
+            os.fsync(output.fileno())
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+@dataclass
+class Session:
+    name: str
+    config: Config
+    session_dir: Path
+    workspace_dir: Path
+    queue: RunQueue = field(default_factory=RunQueue, repr=False)
+
+    @classmethod
+    def create(
+        cls,
+        name: str,
+        config: Config,
+        *,
+        goal: str | None = None,
+        home=None,
+        wt_root=None,
+        queue: RunQueue | None = None,
+    ) -> Session:
+        from .worktree import start
+
+        private, public = _paths(name, home, wt_root)
+        if config.target_repo.is_relative_to(private):
+            raise ValueError("target repository cannot be inside the session")
+        if goal is not None:
+            config = replace(config, goal=goal)
+        private.mkdir(parents=True, mode=0o700)
+        public.mkdir(parents=True)
+        session = cls(name, config, private, public, queue or RunQueue())
+        data = asdict(config)
+        data["target_repo"] = str(config.target_repo)
+        # These fields use TOML's JSON-compatible scalar and array subset.
+        (private / "config.toml").write_text(
+            "".join(
+                f"{key} = {json.dumps(value, ensure_ascii=False)}\n" for key, value in data.items()
+            )
+        )
+        (private / "log.jsonl").touch()
+        (private / "tried.md").write_text(
+            "# Tried ideas\n\nIteration | Idea | Outcome\n--- | --- | ---\n"
+        )
+        (public / "data").mkdir()
+        (public / "artifacts").mkdir()
+        start(session)
+        session.regenerate_state()
+        return session
+
+    @classmethod
+    def load(cls, name: str, *, home=None, wt_root=None, queue=None) -> Session:
+        private, public = _paths(name, home, wt_root)
+        config = Config(**tomllib.loads((private / "config.toml").read_text()))
+        return cls(name, config, private, public, queue or RunQueue())
+
+    @property
+    def branch(self) -> str:
+        return f"autoresearch/{self.name}"
+
+    @property
+    def best(self) -> dict | None:
+        path = self.session_dir / "best.json"
+        return json.loads(path.read_text()) if path.exists() else None
+
+    @property
+    def timeout_s(self) -> float:
+        best = self.best
+        if not best:
+            return self.config.initial_timeout_s
+        return self.config.timeout_factor * median(best["wall_times"])
+
+    def rows(self) -> list[dict]:
+        lines = (self.session_dir / "log.jsonl").read_text().splitlines()
+        return [json.loads(line) for line in lines]
+
+    def next_seed(self) -> int:
+        return max((row.get("seed") or 0 for row in self.rows()), default=0) + 1
+
+    def next_iteration(self) -> int:
+        return max((row["iteration"] for row in self.rows()), default=0) + 1
+
+    def write_best(self, best: dict) -> None:
+        _atomic_write(
+            self.session_dir / "best.json", json.dumps(best, allow_nan=False, indent=2) + "\n"
+        )
+
+    def append(self, row: dict) -> None:
+        row = {"ts": datetime.now(UTC).isoformat(), **row}
+        with (self.session_dir / "log.jsonl").open("a", encoding="utf-8") as output:
+            output.write(json.dumps(row, allow_nan=False) + "\n")
+            output.flush()
+            os.fsync(output.fileno())
+        self.regenerate_state()
+
+    def tried(self, iteration: int, idea: str, outcome: str) -> None:
+        idea = " ".join(idea.split()).replace("|", "\\|")
+        with (self.session_dir / "tried.md").open("a", encoding="utf-8") as output:
+            output.write(f"{iteration} | {idea} | {outcome}\n")
+
+    def regenerate_state(self) -> None:
+        best = self.best
+        current = f"{best['metric']} @ `{best['commit']}`" if best else "Awaiting baseline"
+        noise = f"MAD {best['noise_mad']}; threshold {best['threshold']}" if best else "Unmeasured"
+        recent = "\n".join(
+            f"- {row['iteration']}: {row['status']} metric={row['metric']} — "
+            f"{' '.join(row['idea'].split())}"
+            for row in self.rows()[-5:]
+        )
+        _atomic_write(
+            self.session_dir / "state.md",
+            (
+                f"# {self.name}\n\nGoal: {self.config.goal}\n\n"
+                f"Metric: {self.config.metric} ({self.config.direction})\n\n"
+                f"Current best: {current}\n\nNoise floor: {noise}\n\n"
+                f"## Last 5 results\n\n{recent}\n\n[Already tried](tried.md)\n"
+            ),
+        )

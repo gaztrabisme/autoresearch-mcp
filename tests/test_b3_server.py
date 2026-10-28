@@ -150,7 +150,7 @@ def test_mcp_stdio_handshake_lists_tools_and_reads_status(session_factory):
         "PYTHONPATH": os.pathsep.join(
             [
                 str(project / "src"),
-                str(project.parent / "subagent-mcp-wt/autoresearch-aware/src"),
+                str(project.parent / "subagent-mcp/src"),
             ]
         ),
     }

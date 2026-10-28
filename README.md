@@ -15,7 +15,7 @@ uv sync
 .venv/bin/ruff check
 ```
 
-Keep the sibling `../subagent-mcp-wt/autoresearch-aware` checkout in place. To use
+Clone subagent-mcp next to this repo as `../subagent-mcp` (its `fuse` branch). To use
 the installed console commands in this shell:
 
 ```sh
